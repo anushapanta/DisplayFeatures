@@ -1,0 +1,41 @@
+{% extends "base.html" %}
+{% block content %}
+
+<form action="{{ url_for('upload') }}" method="post" enctype="multipart/form-data">
+  <label for="rootfile">Upload a .root file (TH1 names must encode ieta/iphi, e.g. ieta12_iphi34)</label>
+  <input type="file" id="rootfile" name="rootfile" accept=".root" required>
+
+  <details>
+  <summary>Grid settings (optional)</summary>
+  <div class="grid" style="grid-template-columns: repeat(4, minmax(0, 1fr)); gap:.5rem;">
+    <label>n_ieta <input type="number" name="n_ieta" value="96" min="1"></label>
+    <label>n_iphi <input type="number" name="n_iphi" value="256" min="1"></label>
+    <label>ieta_min <input type="number" name="ieta_min" value="0"></label>
+    <label>iphi_min <input type="number" name="iphi_min" value="0"></label>
+  </div>
+  <div style="margin-top:.5rem;">
+    <label>Fallback order
+      <select name="order">
+        <option value="ieta-major" selected>ieta-major (rows by ieta, columns by iphi)</option>
+        <option value="iphi-major">iphi-major (columns by iphi, rows by ieta)</option>
+      </select>
+    </label>
+  </div>
+  <p class="muted">
+    If your TH1 names don’t contain ieta/iphi, the app maps histograms by position.<br>
+    Try swapping the order if the mapping looks rotated/transposed.
+  </p>
+</details>
+
+
+  <button type="submit">Index & Open Grid</button>
+</form>
+
+{% if error %}
+<article>
+  <header>Error</header>
+  <p>{{ error }}</p>
+</article>
+{% endif %}
+
+{% endblock %}

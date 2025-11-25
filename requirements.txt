@@ -1,0 +1,4 @@
+Flask==3.0.0
+uproot==5.3.8
+numpy==2.1.2
+cachetools==5.3.3

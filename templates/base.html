@@ -1,0 +1,26 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>{{ title or "ROOT Histogram Grid" }}</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@picocss/pico@2/css/pico.min.css">
+    <script src="https://cdn.plot.ly/plotly-2.30.0.min.js"></script>
+    <style>
+      main { max-width: 1200px; margin: auto; padding: 1rem; }
+      .row { display: flex; gap: 1rem; flex-wrap: wrap; }
+      #gridCanvas { border: 1px solid #333; image-rendering: pixelated; cursor: crosshair; }
+      #hist { width: 520px; height: 420px; }
+      .muted { color: #777; font-size: 0.9rem; }
+      .badge { background:#eee; padding: .15rem .5rem; border-radius: 6px; }
+      #hoverInfo { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.95rem;}
+      .pin-state { margin-left:.5rem; font-weight:600; }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h2>{{ title or "ROOT Histogram Grid" }}</h2>
+      {% block content %}{% endblock %}
+    </main>
+  </body>
+</html>
