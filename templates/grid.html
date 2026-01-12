@@ -4,27 +4,48 @@
 <p class="muted">
   File: <b>{{ root_path }}</b> &nbsp; | &nbsp;
   Indexed histograms: <span class="badge">{{ matched }}</span> &nbsp; | &nbsp;
-  <span id="pinLabel">Mode: <span class="pin-state">Hover</span></span>
+  Mode: <span class="pin-state">Hover</span>
 </p>
 
-<div class="row">
+<div style="display:flex; gap:1rem; flex-wrap:wrap;">
   <div>
-    <canvas id="gridCanvas" width="{{ n_iphi }}" height="{{ n_ieta }}"></canvas>
-    <div id="hoverInfo">ieta: –, iphi: – (no data)</div>
+    <div style="display:flex; align-items:center; gap:.5rem; margin-bottom:.5rem;">
+      <label>Metric
+        <select id="metricSel">
+          <option value="mean" selected>mean</option>
+          <option value="entries">entries</option>
+          <option value="std">std</option>
+          <option value="maxbin">maxbin</option>
+        </select>
+      </label>
+      <button id="refreshBtn" type="button">Recompute</button>
+    </div>
+
+    <div style="display:flex; gap:.5rem;">
+      <!-- intrinsic size = N_IPHI × N_IETA, 1px per cell; CSS scales it up -->
+      <canvas id="gridCanvas" width="{{ n_iphi }}" height="{{ n_ieta }}"></canvas>
+      <div>
+        <canvas id="colorbar" width="24" height="{{ n_ieta }}"></canvas>
+        <div id="cbLabels" class="muted" style="text-align:center; font-size:.85rem; margin-top:.25rem;"></div>
+      </div>
+    </div>
+
+    <div id="hoverInfo">ieta: –, iphi: – (out of grid)</div>
     <p class="muted">Grid is {{ n_ieta }} × {{ n_iphi }}. Hover to preview; <b>click to pin</b> / unpin.</p>
   </div>
+
   <div>
-    <div id="hist"></div>
+    <div id="hist" style="width:520px; height:420px;"></div>
   </div>
 </div>
 
-<!-- put this above your <script> that uses the values -->
+<!-- Pass config to JS in a JSON tag (keeps linter happy) -->
 <script id="grid-config" type="application/json">
   {{ {"token": token, "n_ieta": n_ieta, "n_iphi": n_iphi, "ieta_min": ieta_min, "iphi_min": iphi_min} | tojson }}
 </script>
 
 <script>
-  // Settings from server (linter-safe)
+  // -------- config --------
   const CFG = JSON.parse(document.getElementById("grid-config").textContent);
   const TOKEN    = CFG.token;
   const N_IETA   = CFG.n_ieta;
@@ -32,134 +53,177 @@
   const IETA_MIN = CFG.ieta_min;
   const IPHI_MIN = CFG.iphi_min;
 
-  // Canvas
-  const canvas = document.getElementById('gridCanvas');
-  const ctx = canvas.getContext('2d');
-  // Draw a simple color pattern so cells are visible (1px per cell → scaled via CSS)
-  const img = ctx.createImageData(canvas.width, canvas.height);
-  for (let y = 0; y < canvas.height; y++) {
-    for (let x = 0; x < canvas.width; x++) {
-      const i = (y * canvas.width + x) * 4;
-      const hue = (x * 7 + y * 3) % 255;
-      img.data[i + 0] = hue;
-      img.data[i + 1] = (255 - hue);
-      img.data[i + 2] = (x ^ y) & 0xff;
-      img.data[i + 3] = 255;
-    }
-  }
-  ctx.putImageData(img, 0, 0);
-  canvas.style.width = "768px";
-  canvas.style.height = "288px";
-
-  // UI
+  // -------- DOM --------
+  const canvas    = document.getElementById('gridCanvas');
+  const ctx       = canvas.getContext('2d', { willReadFrequently: false });
+  const cbCanvas  = document.getElementById('colorbar');
+  const cbCtx     = cbCanvas.getContext('2d');
+  const cbLabels  = document.getElementById('cbLabels');
+  const metricSel = document.getElementById('metricSel');
+  const refreshBtn= document.getElementById('refreshBtn');
   const hoverInfo = document.getElementById('hoverInfo');
   const histDiv   = document.getElementById('hist');
   const pinLabel  = document.querySelector('.pin-state');
 
-  // State
-  let lastHoverKey = null;
-  let debounceTimer = null;
-  let pinned = false;            // click toggles this
-  let pinnedCell = null;         // {ieta, iphi}
+  // intrinsic size (defensive) + CSS scale for visibility
+  canvas.width  = N_IPHI;
+  canvas.height = N_IETA;
+  canvas.style.width  = "768px";
+  canvas.style.height = "288px";
 
-  function canvasToCell(evt) {
-    const rect = canvas.getBoundingClientRect();
-    const scaleX = canvas.width / rect.width;
-    const scaleY = canvas.height / rect.height;
-    const x = Math.floor((evt.clientX - rect.left) * scaleX); // 0..N_IPHI-1
-    const y = Math.floor((evt.clientY - rect.top) * scaleY);  // 0..N_IETA-1
-    return { ieta: IETA_MIN + y, iphi: IPHI_MIN + x };
+  // -------- colormap + colorbar --------
+  function viridis(t){
+    t = Math.max(0, Math.min(1, t));
+    const a=[0.267,0.005,0.329], b=[0.255,0.665,0.196], c=[0.24,0.12,0.522], d=[-0.305,-0.04,-1.325];
+    const r=a[0]+b[0]*Math.pow(t,c[0])+d[0]*t, g=a[1]+b[1]*Math.pow(t,c[1])+d[1]*t, bb=a[2]+b[2]*Math.pow(t,c[2])+d[2]*t;
+    return [Math.round(255*r), Math.round(255*g), Math.round(255*bb), 255];
   }
-
-  function setPinState(isPinned) {
-    pinned = isPinned;
-    pinLabel.textContent = pinned ? "Pinned" : "Hover";
-  }
-
-  function showSummary(ieta, iphi, extra="") {
-    hoverInfo.textContent = `ieta: ${ieta}, iphi: ${iphi}${extra}`;
-  }
-
-  function drawHistogram(payload) {
-    if (!payload || !payload.found) {
-      Plotly.newPlot(histDiv, [], {title: "No histogram for this cell"});
-      return;
+  function drawColorbar(vmin, vmax){
+    const h = cbCanvas.height, w = cbCanvas.width;
+    const img = cbCtx.createImageData(w, h);
+    for (let y=0; y<h; y++){
+      const t = 1 - y/(h-1);
+      const [R,G,B,A] = viridis(t);
+      for (let x=0; x<w; x++){
+        const i=(y*w+x)*4; img.data[i]=R; img.data[i+1]=G; img.data[i+2]=B; img.data[i+3]=A;
+      }
     }
-    const edges = payload.edges;
-    const counts = payload.counts;
-    const centers = [];
-    for (let i = 0; i < edges.length - 1; i++) centers.push(0.5 * (edges[i] + edges[i + 1]));
-
-    const trace = {
-      x: centers,
-      y: counts,
-      type: "bar",
-      marker: { line: { width: 1 } },
-      hovertemplate: "Center %{x}<br>Count %{y}<br>[%{customdata[0]}, %{customdata[1]})<extra></extra>",
-      customdata: edges.slice(0, -1).map((_, i) => [edges[i], edges[i + 1]]),
-    };
-    const info = payload.info || {};
-    const layout = {
-      title: `ieta=${payload.ieta}, iphi=${payload.iphi} | entries=${info.entries ?? "-"} mean=${info.mean?.toFixed?.(3) ?? "-"} std=${info.std?.toFixed?.(3) ?? "-"}`,
-      xaxis: { title: "Value" },
-      yaxis: { title: "Entries" },
-      bargap: 0.05
-    };
-    Plotly.newPlot(histDiv, [trace], layout);
+    cbCtx.putImageData(img,0,0);
+    cbLabels.innerHTML = `${Number(vmin).toPrecision(2)}&nbsp;–&nbsp;${Number(vmax).toPrecision(2)}`;
   }
 
-  async function fetchHistogram(ieta, iphi) {
-    const url = `/hist?token=${encodeURIComponent(TOKEN)}&ieta=${encodeURIComponent(ieta)}&iphi=${encodeURIComponent(iphi)}`;
+  // -------- placeholder (so the box is never blank) --------
+  function drawPlaceholder(){
+    const img = ctx.createImageData(canvas.width, canvas.height);
+    for (let y=0; y<canvas.height; y++){
+      for (let x=0; x<canvas.width; x++){
+        const i = (y*canvas.width + x) * 4;
+        const t = ((x*13 + y*7) % 256) / 255;  // subtle speckle
+        const [R,G,B,A] = viridis(t);
+        img.data[i]=R; img.data[i+1]=G; img.data[i+2]=B; img.data[i+3]=A;
+      }
+    }
+    ctx.putImageData(img, 0, 0);
+    drawColorbar(0, 1);
+  }
+
+  // -------- heatmap fetch/draw --------
+  async function fetchHeatmap(metric, force=false){
+    const url = `/heatmap?token=${encodeURIComponent(TOKEN)}`
+              + `&metric=${encodeURIComponent(metric)}`
+              + (force ? `&force=1` : ``);
     const r = await fetch(url);
     if (!r.ok) throw new Error(`HTTP ${r.status}`);
     return await r.json();
   }
 
-  canvas.addEventListener('mousemove', (evt) => {
-    const { ieta, iphi } = canvasToCell(evt);
-    if (pinned) {
-      showSummary(pinnedCell?.ieta ?? ieta, pinnedCell?.iphi ?? iphi, " (pinned)");
-      return; // ignore hover updates while pinned
+  function drawHeatmap(hm){
+    if (!hm || !Array.isArray(hm.grid) || !hm.grid.length){
+      ctx.fillStyle = "rgba(255,255,255,.85)";
+      ctx.font = "10px ui-monospace, monospace";
+      ctx.fillText("no heatmap data", 6, 12);
+      cbLabels.textContent = "no data";
+      return;
     }
+    const rows = Math.min(hm.grid.length,    N_IETA);
+    const cols = Math.min(hm.grid[0].length, N_IPHI);
+    const vmin = Number(hm.vmin);
+    const vmax = (Number(hm.vmax) === Number(hm.vmin)) ? Number(hm.vmin) + 1e-12 : Number(hm.vmax);
+
+    const img = ctx.createImageData(cols, rows);
+    for (let y=0; y<rows; y++){
+      const row = hm.grid[y] || [];
+      for (let x=0; x<cols; x++){
+        const i = (y*cols + x) * 4;
+        const v = row[x];
+        if (v === null || Number.isNaN(v)){
+          img.data[i]=220; img.data[i+1]=220; img.data[i+2]=220; img.data[i+3]=255; // missing -> light gray
+        } else {
+          const t = (Number(v) - vmin) / (vmax - vmin || 1e-12);
+          const [R,G,B,A] = viridis(t);
+          img.data[i]=R; img.data[i+1]=G; img.data[i+2]=B; img.data[i+3]=A;
+        }
+      }
+    }
+    ctx.putImageData(img, 0, 0);
+    drawColorbar(vmin, vmax);
+  }
+
+  async function refresh(force=false){
+    drawPlaceholder(); // immediate visual
+    const metric = metricSel.value;
+    refreshBtn.disabled = true;
+    try{
+      const hm = await fetchHeatmap(metric, force);
+      console.log("heatmap:", metric, "shape=", hm.grid?.length, "x", hm.grid?.[0]?.length, "vmin/vmax=", hm.vmin, hm.vmax);
+      drawHeatmap(hm); // replaces placeholder
+    } catch (e){
+      console.error("heatmap fetch/draw failed:", e);
+      // leave placeholder
+    } finally {
+      refreshBtn.disabled = false;
+    }
+  }
+
+  // -------- histogram preview (hover) + pin (click) --------
+  let pinned=false, pinnedCell=null, lastHoverKey=null, debounceTimer=null;
+  function setPinState(b){ pinned=b; pinLabel.textContent = b ? "Pinned" : "Hover"; }
+  function canvasToCell(evt){
+    const r = canvas.getBoundingClientRect();
+    const x = Math.floor((evt.clientX - r.left) * (canvas.width / r.width));
+    const y = Math.floor((evt.clientY - r.top)  * (canvas.height/ r.height));
+    return { ieta: IETA_MIN + y, iphi: IPHI_MIN + x };
+  }
+  function showSummary(ieta, iphi, extra=""){ hoverInfo.textContent = `ieta: ${ieta}, iphi: ${iphi}${extra}`; }
+
+  async function fetchHistogram(ieta, iphi){
+    const r = await fetch(`/hist?token=${encodeURIComponent(TOKEN)}&ieta=${ieta}&iphi=${iphi}`);
+    if (!r.ok) throw new Error(`HTTP ${r.status}`); return await r.json();
+  }
+  function drawHistogram(p){
+    if (!p || !p.found){
+      Plotly.newPlot(histDiv, [], {title:"No histogram for this cell"}); return;
+    }
+    const edges=p.edges, counts=p.counts, centers=[];
+    for(let i=0;i<edges.length-1;i++) centers.push(0.5*(edges[i]+edges[i+1]));
+    const info=p.info||{};
+    Plotly.newPlot(histDiv,[{
+      x:centers, y:counts, type:"bar", marker:{line:{width:1}},
+      hovertemplate:"Center %{x}<br>Count %{y}<br>[%{customdata[0]}, %{customdata[1]})<extra></extra>",
+      customdata: edges.slice(0,-1).map((_,i)=>[edges[i],edges[i+1]]),
+    }],{
+      title:`ieta=${p.ieta}, iphi=${p.iphi} | entries=${info.entries ?? "-"} mean=${info.mean?.toFixed?.(3) ?? "-"} std=${info.std?.toFixed?.(3) ?? "-"}`,
+      xaxis:{ title:"Value" }, yaxis:{ title:"Entries" }, bargap:0.05
+    });
+  }
+
+  canvas.addEventListener('mousemove', (evt)=>{
+    const { ieta, iphi } = canvasToCell(evt);
+    if (pinned){ showSummary(pinnedCell?.ieta ?? ieta, pinnedCell?.iphi ?? iphi, " (pinned)"); return; }
     showSummary(ieta, iphi);
-    const key = `${ieta}_${iphi}`;
-    if (key === lastHoverKey) return;
-    lastHoverKey = key;
-
+    const key = `${ieta}_${iphi}`; if (key === lastHoverKey) return; lastHoverKey = key;
     if (debounceTimer) clearTimeout(debounceTimer);
-    debounceTimer = setTimeout(async () => {
-      try {
-        const data = await fetchHistogram(ieta, iphi);
-        drawHistogram(data);
-      } catch (e) {
-        console.error(e);
-      }
-    }, 60);
+    debounceTimer = setTimeout(async()=>{ try{ drawHistogram(await fetchHistogram(ieta, iphi)); }catch(e){ console.error(e); } }, 60);
   });
 
-  canvas.addEventListener('click', async (evt) => {
+  canvas.addEventListener('click', async (evt)=>{
     const { ieta, iphi } = canvasToCell(evt);
-    if (!pinned) {
-      // pin current cell
-      setPinState(true);
-      pinnedCell = { ieta, iphi };
-      showSummary(ieta, iphi, " (pinned)");
-      try {
-        const data = await fetchHistogram(ieta, iphi);
-        drawHistogram(data);
-      } catch (e) {
-        console.error(e);
-      }
+    if (!pinned){
+      setPinState(true); pinnedCell={ieta,iphi}; showSummary(ieta, iphi, " (pinned)");
+      try{ drawHistogram(await fetchHistogram(ieta, iphi)); }catch(e){}
     } else {
-      // unpin
-      setPinState(false);
-      pinnedCell = null;
+      setPinState(false); pinnedCell=null;
     }
   });
 
-  canvas.addEventListener('mouseleave', () => {
-    if (!pinned) hoverInfo.textContent = "ieta: –, iphi: – (out of grid)";
-  });
+  canvas.addEventListener('mouseleave', ()=>{ if(!pinned) hoverInfo.textContent="ieta: –, iphi: – (out of grid)"; });
+
+  // UI wiring
+  refreshBtn.addEventListener('click', () => refresh(true));   // force rebuild on server
+  metricSel.addEventListener('change', () => refresh(false));  // cached is fine
+
+  // initial paint (no force)
+  refresh(false);
 </script>
 
 {% endblock %}

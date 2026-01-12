@@ -1,27 +1,29 @@
 from flask import Flask, render_template, request, redirect, url_for, jsonify, abort
 import os, uuid
 from cachetools import LRUCache
-from src.root_grid import index_histograms, read_histogram, stats_from_hist
+from src.root_grid import (
+    index_histograms,
+    read_histogram,
+    stats_from_hist,
+    compute_heatmap,
+)
 
 app = Flask(__name__)
 app.config["UPLOAD_FOLDER"] = "uploads"
-app.config["MAX_CONTENT_LENGTH"] = 500 * 1024 * 1024  # 500 MB limit
+app.config["MAX_CONTENT_LENGTH"] = 500 * 1024 * 1024  # 500 MB
 os.makedirs(app.config["UPLOAD_FOLDER"], exist_ok=True)
 
-# Each upload gets a token → we keep its path, index, and a small cache
-STATE = {}  # token: {"path": str, "index": dict[(ieta,iphi)->key], "cache": LRUCache}
+# token -> per-upload state
+STATE = {}  # { token: {"path", "index", "cache", "heatmap_cache", "n_ieta"...} }
 
-# Defaults (change if your coordinate base is different)
-DEFAULT_N_IETA = 96
-DEFAULT_N_IPHI = 256
-DEFAULT_IETA_MIN = 0   # set to -48 if your ieta is -48..+47
-DEFAULT_IPHI_MIN = 0   # set to 1 if your iphi is 1..256
+DEFAULTS = dict(n_ieta=96, n_iphi=256, ieta_min=0, iphi_min=0, order="ieta-major")
+
 
 @app.route("/", methods=["GET"])
 def index():
     return render_template("index.html")
 
-# in app.py (replace the upload() body)
+
 @app.route("/upload", methods=["POST"])
 def upload():
     f = request.files.get("rootfile")
@@ -32,11 +34,12 @@ def upload():
     save_path = os.path.join(app.config["UPLOAD_FOLDER"], f"{token}.root")
     f.save(save_path)
 
-    n_ieta   = int(request.form.get("n_ieta") or 96)
-    n_iphi   = int(request.form.get("n_iphi") or 256)
-    ieta_min = int(request.form.get("ieta_min") or 0)
-    iphi_min = int(request.form.get("iphi_min") or 0)
-    order    = request.form.get("order") or "ieta-major"
+    # read grid settings (optional)
+    n_ieta   = int(request.form.get("n_ieta") or DEFAULTS["n_ieta"])
+    n_iphi   = int(request.form.get("n_iphi") or DEFAULTS["n_iphi"])
+    ieta_min = int(request.form.get("ieta_min") or DEFAULTS["ieta_min"])
+    iphi_min = int(request.form.get("iphi_min") or DEFAULTS["iphi_min"])
+    order    = request.form.get("order") or DEFAULTS["order"]
 
     try:
         mapping = index_histograms(save_path, n_ieta, n_iphi, ieta_min, iphi_min, order)
@@ -46,7 +49,8 @@ def upload():
     STATE[token] = {
         "path": save_path,
         "index": mapping,
-        "cache": LRUCache(maxsize=1024),
+        "cache": LRUCache(maxsize=2048),
+        "heatmap_cache": {},  # metric -> payload
         "n_ieta": n_ieta,
         "n_iphi": n_iphi,
         "ieta_min": ieta_min,
@@ -55,37 +59,13 @@ def upload():
     }
     return redirect(url_for("grid", token=token))
 
-    f = request.files.get("rootfile")
-    if not f or f.filename == "":
-        return redirect(url_for("index"))
-
-    token = str(uuid.uuid4())
-    save_path = os.path.join(app.config["UPLOAD_FOLDER"], f"{token}.root")
-    f.save(save_path)
-
-    # Build index of (ieta,iphi) -> uproot key
-    try:
-        mapping = index_histograms(save_path)
-    except Exception as e:
-        return render_template("index.html", error=f"Failed to read ROOT file: {e}")
-
-    # You can infer grid extents here if needed; for now, use defaults
-    STATE[token] = {
-        "path": save_path,
-        "index": mapping,
-        "cache": LRUCache(maxsize=1024),
-        "n_ieta": int(request.form.get("n_ieta") or DEFAULT_N_IETA),
-        "n_iphi": int(request.form.get("n_iphi") or DEFAULT_N_IPHI),
-        "ieta_min": int(request.form.get("ieta_min") or DEFAULT_IETA_MIN),
-        "iphi_min": int(request.form.get("iphi_min") or DEFAULT_IPHI_MIN),
-    }
-    return redirect(url_for("grid", token=token))
 
 def _get_state_or_404(token: str):
     st = STATE.get(token)
     if not st:
         abort(404, "Unknown session token; please re-upload the file.")
     return st
+
 
 @app.route("/grid/<token>", methods=["GET"])
 def grid(token):
@@ -100,6 +80,7 @@ def grid(token):
         matched=len(st["index"]),
         root_path=os.path.basename(st["path"]),
     )
+
 
 @app.route("/hist", methods=["GET"])
 def api_hist():
@@ -136,6 +117,34 @@ def api_hist():
         return jsonify(payload)
     except Exception as e:
         abort(500, f"Failed to read histogram: {e}")
+
+
+@app.route("/heatmap", methods=["GET"])
+def api_heatmap():
+    token  = request.args.get("token")
+    metric = (request.args.get("metric") or "mean").lower()
+    force  = request.args.get("force") in ("1", "true", "True")
+
+    st = _get_state_or_404(token)
+    st.setdefault("heatmap_cache", {})
+
+    # Serve cached unless 'force' is requested
+    if not force and metric in st["heatmap_cache"]:
+        return jsonify(st["heatmap_cache"][metric])
+
+    grid, vmin, vmax = compute_heatmap(
+        st["path"],
+        st["index"],
+        st["n_ieta"],
+        st["n_iphi"],
+        st["ieta_min"],
+        st["iphi_min"],
+        metric,
+    )
+    payload = {"grid": grid, "vmin": vmin, "vmax": vmax, "metric": metric}
+    st["heatmap_cache"][metric] = payload  # refresh cache
+    return jsonify(payload)
+
 
 if __name__ == "__main__":
     app.run(debug=True)
