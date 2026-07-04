@@ -1,1 +1,1 @@
-# HistVisualizer
+# HistogramVisualizer
