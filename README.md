@@ -1,2 +1,1 @@
-# DisplayFeatures
-
+# HistVisualizer
